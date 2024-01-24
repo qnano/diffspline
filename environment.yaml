@@ -1,0 +1,15 @@
+name: diffspline
+
+dependencies:
+  - pytorch
+  - cudatoolkit
+  - numpy
+  - scipy
+  - matplotlib
+  - tensorboard
+  - tifffile
+  - tqdm
+  - pyqtgraph   # for array_view
+
+  # add kernel to jupyter
+  - ipykernel

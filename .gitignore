@@ -1,0 +1,13 @@
+.idea*
+.vs*
+*.pyc
+data/*
+.ipynb_checkpoints*
+*.tif
+*.tiff
+*.pickle
+*.mat
+*.pt
+*.txt
+*.DS_Store
+*.svg

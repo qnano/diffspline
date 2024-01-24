@@ -1,0 +1,216 @@
+function [splinefit,indgood,shift,z0reference]=getstackcal_so(beads,p)
+global stackcal_testfit
+isastig=contains(p.modality,'astig'); %||contains(p.modality,'2D');
+alignzastig=isastig&contains(p.zcorr,'astig');
+zcorr=contains(p.zcorr,'corr');
+sstack=size(beads(1).stack.image);
+    halfstoreframes=round((size(beads(1).stack.image,3)-1)/2);
+    if isastig    
+        for B=length(beads):-1:1
+            if  halfstoreframes<length(beads(B).stack.framerange)
+                dframe(B)=beads(B).stack.framerange(halfstoreframes+1)-beads(B).f0;
+            else
+                dframe(B)=NaN;
+            end
+        end
+        
+    %remove outliers:
+        badind=abs(dframe-nanmedian(dframe))>10|isnan(dframe);
+        beads(badind)=[];
+    
+
+        psfx=[beads(:).psfx0];psfy=[beads(:).psfy0];
+        dpsfx=(psfx-median(psfx(~isnan(psfx))))*10;
+        dpsfy=(psfy-median(psfy(~isnan(psfy))))*10;
+    else
+        dframe=0;
+        dpsfx=0;dpsfy=0;
+    end
+    
+    allstacks=zeros(sstack(1),sstack(2),sstack(3),length(beads))+NaN;
+    goodvs=[];
+    for B=length(beads):-1:1
+        stackh=beads(B).stack.image;
+        allstacks(:,:,1:size(stackh,3),B)=stackh;
+        stackh=allstacks(:,:,:,B);
+        goodvs(B)=sum(~isnan(stackh(:)))/numel(stackh);
+    end
+    
+    mstack=nanmean(allstacks,4);
+    mstacks=mstack(3:end-2);
+    mstack=mstack-nanmin(mstacks(:));
+    mstack=mstack/nansum(mstack(:));
+    for k=length(beads):-1:1
+    	stackh=(allstacks(:,:,:,k));
+        stackh=stackh-nanmin(stackh(:));
+        stackh=stackh/nansum(stackh(:));
+        dstack(k)=sum((stackh(:)-mstack(:)).^2);
+    end
+    dstack=dstack/mean(dstack);    
+    devs=(dpsfx.^2+dpsfy.^2+dstack)./goodvs;
+
+    if zcorr
+        
+        fw2=round((p.zcorrframes-1)/2);
+        
+    else
+        fw2=2;
+    end
+   
+%     ax=axes('Parent',uitab(p.tabgroup,'Title','scatter'));
+
+    [~,sortinddev]=sort(devs);
+%     allrois=allstacks(:,:,:,sortinddev);
+    
+    if alignzastig
+        zshift=dframe(sortinddev)-round(median(dframe));
+    else
+        zshift=[];
+    end
+    
+%     focusreference=round(median(dframe));
+    midrange=halfstoreframes+1-round(median(dframe));
+     framerange=max(1,midrange-fw2):min(midrange+fw2,size(stackh,3));
+    p.status.String='calculate shift of individual PSFs';drawnow
+    filenumber=[beads(:).filenumber];
+    [corrPSF,shiftedstack,shift,beadgood]=registerPSF3D_so(allstacks,struct('sortind',sortinddev,'framerange',framerange,'alignz',zcorr,'zshiftf0',zshift,'beadfilterf0',false,'status',p.status),{},filenumber(sortinddev));
+    
+    
+    %undo sorting by deviation to associate beads again to their
+    %bead number
+%     [~,sortback]=sort(sortinddev);
+%     shiftedstack=shiftedstack(:,:,:,sortback);
+%     beadgood=beadgood(sortback);
+
+    indgood=beadgood;
+    allrois=allstacks;
+  
+
+        %cut out the central part of the PSF correspoinding to the set
+        %Roisize in x,y and z
+
+        scorrPSF=size(corrPSF);
+        x=round((scorrPSF(1)+1)/2);y=round((scorrPSF(2)+1)/2);
+
+        dRx=round((p.ROIxy-1)/2);
+        if ~isfield(p,'ROIz') || isnan(p.ROIz)
+            p.ROIz=size(corrPSF,3);
+        end
+            dzroi=round((p.ROIz-1)/2);
+        
+        rangex=x-dRx:x+dRx;
+        rangey=y-dRx:y+dRx;
+
+        z=midrange;%always same reference: z=f0
+        rangez=max(1,z-dzroi):min(size(corrPSF,3),z+dzroi);
+        z0reference=find(rangez>=z,1,'first');
+        
+        %normalize PSF
+        centpsf=corrPSF(rangex,rangey,z-1:z+1,:); %cut out rim from shift
+%         centpsf=corrPSF(2:end-1,2:end-1,2:end-1); %cut out rim from shift
+        minPSF=nanmin(centpsf,[],[1,2,3]); %
+        corrPSFn=corrPSF-minPSF;
+%         corrPSFn=corrPSF;
+        intglobal=nanmean(nansum(nansum(corrPSFn(rangex,rangey,z-1:z+1),1),2));
+        corrPSFn=corrPSFn/intglobal;
+        
+        shiftedstack=shiftedstack/intglobal;
+
+        corrPSFn(isnan(corrPSFn))=0;
+        corrPSFn(corrPSFn<0)=0;
+        corrPSFs=corrPSFn(rangex,rangey,rangez,:);
+        
+        splinefit.PSFs=corrPSFs;
+
+        splinefit.allstacks=allstacks;
+        splinefit.shiftedstack=shiftedstack;
+        splinefit.shift=shift;
+
+end
+
+function zs=testfit(teststack,coeff,p,linepar,ax)
+if nargin<4
+    linepar={};
+elseif ~iscell(linepar)
+    linepar={linepar};
+end
+fitsize=min(p.ROIxy,21);
+d=round((size(teststack,1)-fitsize)/2);
+            range=d+1:d+fitsize;
+
+numstack=size(teststack,4);
+t=tic;
+% f=figure(989);ax2=gca;hold off
+    for k=1:size(teststack,4)
+        if toc(t)>1
+            p.status.String=['fitting test stacks: ' num2str(k/numstack,'%1.2f')];drawnow
+            t=tic;
+        end
+        if contains(p.modality,'2D')
+            fitmode=6;
+        else
+            fitmode=5;
+        end
+
+        [P] =  mleFit_LM(single(squeeze(teststack(range,range,:,k))),fitmode,100,single(coeff),0,1);
+        
+        z=(1:size(P,1))'-1;
+
+        znm=(P(:,5)-p.z0)*p.dz;
+        plot(ax,z,znm,linepar{:})
+        hold(ax,'on')
+        xlabel(ax,'frame')
+        ylabel(ax,'zfit (nm)')
+        zs(:,k)=P(:,5);
+% test for the returned photons and photons in the raw image        
+%         phot=P(:,3); bg=P(:,4);
+%         totsum=squeeze(nansum( nansum(teststack(range,range,:,k),1),2));
+%         totsum=totsum-squeeze(min(min(teststack(range,range,:,k),[],1),[],2))*length(range)^2;
+%         photsum=phot+0*bg*length(range)^2;
+%         plot(ax2,z,(photsum-totsum)./totsum,'.')
+%         hold(ax2,'on')
+    end
+    
+end
+
+function teststripes(coeff,p,ax)
+%not used, can be called to test for stripe artifacts.
+tt=tic;
+
+zr=0:0.2:p.ROIz;
+xr=0:0.05:p.ROIxy;
+hz=zeros(1,length(zr)-1);
+hx=zeros(1,length(xr)-1);
+hy=hx;
+while toc(tt)<30
+    nn=rand(11,11,10000,'single');
+%     P=callYimingFitter(nn,single(coeff),50,5,0,1);
+    [P] =  mleFit_LM(nn,5,50,single(coeff),0,1);
+    hz=histcounts(P(:,5),zr)+hz;
+    hx=histcounts(P(:,1),xr)+hx;
+    hy=histcounts(P(:,2),xr)+hy;
+    
+end
+
+hz(1)=[];hz(end)=[];
+hz(1)=0;hz(end)=0;
+
+indx=(hx==0);
+hx(indx)=[];
+indy=(hy==0);
+hy(indy)=[];
+hx(1)=[];hx(end)=[];
+hy(1)=[];hy(end)=[];
+hzx=myxcorr(hz-mean(hz),hz-mean(hz));
+hxx=myxcorr(hx-mean(hx),hx-mean(hx));
+hyx=myxcorr(hy-mean(hy),hy-mean(hy));
+hzx(1)=0;hzx(end)=0;
+ax2=axes(ax.Parent);
+subplot(1,2,1,ax);
+subplot(1,2,2,ax2);
+findx=find(~indx);findy=find(~indy);
+plot(ax,zr(2:end-2),hz,zr(2:end-2),hzx/max(hzx)*(quantile(hz,.99)));
+ax.YLim(2)=(quantile(hz,.99))*1.1;
+ax.YLim(1)=min(quantile(hz,.01),quantile(hzx/max(hzx)*(quantile(hz,.99)),.01));
+plot(ax2,xr(findx(2:end-1)),hx,xr(findx(2:end-1)),hxx/max(hxx)*max(hx),xr(findy(2:end-1)),hy,xr(findy(2:end-1)),hyx/max(hyx)*max(hy));
+end
